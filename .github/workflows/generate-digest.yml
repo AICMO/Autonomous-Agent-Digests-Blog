@@ -1,4 +1,4 @@
-name: Process Telegram
+name: Generate Digest
 
 on:
   schedule:
@@ -31,6 +31,8 @@ jobs:
       TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
       TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
       TELEGRAM_PUBLISH_CHANNEL: ${{ vars.TELEGRAM_PUBLISH_CHANNEL }}
+      SUBSTACK_COOKIE: ${{ secrets.SUBSTACK_COOKIE }}
+      SUBSTACK_PUBLICATION_URL: ${{ vars.SUBSTACK_PUBLICATION_URL }}
 
     steps:
       - name: Checkout
@@ -47,17 +49,17 @@ jobs:
           pip install -r requirements.txt
           python telegram.py --read --since ${{ github.event.inputs.since_hours || '24' }}
 
-      # --- LLM Pipeline ---
-      - name: Generate digest
-        uses: ./.github/actions/llm-pipeline
+      # --- LLM: Telegram digest ---
+      - name: Generate Telegram digest
+        uses: AICMO/llm-call-action@v1
         with:
-          prompt_file: .github/prompts/curate-digest.md
+          prompt_file: .github/prompts/curate-digest-telegram.md
           data_file: /tmp/telegram_messages.json
           output_file: /tmp/llm_response.txt
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           provider: ${{ vars.LLM_PROVIDER || 'claude' }}
           model: ${{ vars.LLM_MODEL || 'claude-sonnet-4-6' }}
-          max_tokens: ${{ vars.LLM_MAX_TOKENS || '12,288' }}
+          max_tokens: ${{ vars.LLM_MAX_TOKENS || '12288' }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           google_api_key: ${{ secrets.GOOGLE_API_KEY }}
@@ -65,8 +67,32 @@ jobs:
           vertex_project: ${{ vars.VERTEX_PROJECT }}
           vertex_region: ${{ vars.VERTEX_REGION }}
 
-      # --- Publish ---
-      - name: Publish digest
+      # --- Publish to Telegram ---
+      - name: Publish to Telegram
         if: ${{ github.event.inputs.skip_publish != 'true' }}
         working-directory: agent/integrations/telegram
         run: python telegram.py --post
+
+      # # --- LLM: Substack digest ---
+      # - name: Generate Substack digest
+      #   uses: AICMO/llm-call-action@v1
+      #   with:
+      #     prompt_file: .github/prompts/curate-digest-substack.md
+      #     data_file: /tmp/telegram_messages.json
+      #     output_file: /tmp/llm_response.txt
+      #     claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      #     provider: ${{ vars.LLM_PROVIDER || 'claude' }}
+      #     model: ${{ vars.LLM_MODEL || 'claude-sonnet-4-6' }}
+      #     max_tokens: ${{ vars.LLM_MAX_TOKENS || '12288' }}
+      #     anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      #     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      #     google_api_key: ${{ secrets.GOOGLE_API_KEY }}
+      #     google_application_credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+      #     vertex_project: ${{ vars.VERTEX_PROJECT }}
+      #     vertex_region: ${{ vars.VERTEX_REGION }}
+      #
+      # - name: Publish to Substack
+      #   if: ${{ github.event.inputs.skip_publish != 'true' }}
+      #   run: |
+      #     pip install -r agent/integrations/substack/requirements.txt
+      #     python agent/integrations/substack/substack.py --post

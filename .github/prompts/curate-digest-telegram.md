@@ -84,6 +84,6 @@ Fun failure — AWS's own AI agent Kiro suggested “delete and recreate the env
    link: https://t.me/some_channel/101
 
 
-Return ONLY the digest text, no other commentary.
+Do not use any tools. Return ONLY the digest text, no other commentary.
 
 ## Messages

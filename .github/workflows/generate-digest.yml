@@ -77,6 +77,7 @@ jobs:
   # --- Step 2a: Generate messenger content (short, emoji, links) ---
   generate-messenger:
     needs: read
+    if: ${{ github.event.inputs.publish_telegram != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -101,7 +102,8 @@ jobs:
           google_application_credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
           vertex_project: ${{ vars.VERTEX_PROJECT }}
           vertex_region: ${{ vars.VERTEX_REGION }}
-          max_turns: '12'
+          max_turns: '5'
+          claude_tools: 'Read'
 
       - uses: actions/upload-artifact@v7
         with:
@@ -112,6 +114,7 @@ jobs:
   # --- Step 2b: Generate blog content (long-form newsletter) ---
   generate-blog:
     needs: read
+    if: ${{ github.event.inputs.publish_ghost != 'false' || github.event.inputs.publish_substack != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -136,7 +139,8 @@ jobs:
           google_application_credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
           vertex_project: ${{ vars.VERTEX_PROJECT }}
           vertex_region: ${{ vars.VERTEX_REGION }}
-          max_turns: '12'
+          max_turns: '5'
+          claude_tools: 'Read'
 
       - uses: actions/upload-artifact@v7
         with:
@@ -168,7 +172,7 @@ jobs:
   publish-ghost:
     needs: generate-blog
     if: ${{ github.event.inputs.publish_ghost != 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

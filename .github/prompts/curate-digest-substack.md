@@ -87,6 +87,6 @@ AWS's own AI agent Kiro recommended "delete and recreate the environment" — in
 Technically correct, but it misses the real issue. The failure isn't that an AI suggested something dangerous — it's that the system architecture allowed a single approval to execute a destructive action in prod. This is an organizational design problem, not an AI problem. Worth reviewing your own approval chains for AI-suggested actions.
 
 
-Return ONLY the digest text, no other commentary.
+Do not use any tools. Return ONLY the digest text, no other commentary.
 
 ## Messages

@@ -98,6 +98,7 @@ class GhostApi:
                 "title": title,
                 "html": html,
                 "status": status,
+                "source": "html",
             }]
         }
         return self._post("/posts/", json=payload)
@@ -173,6 +174,7 @@ def cmd_post(draft_only: bool = False):
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
     title = f"AI Digest — {today}"
     html = digest_to_html(digest_text)
+    print(f"Content: {len(digest_text)} chars → {len(html)} chars HTML")
 
     status = "draft" if draft_only else "published"
     result = api.create_post(title=title, html=html, status=status)

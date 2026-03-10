@@ -6,9 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       since_hours:
-        description: 'Hours to look back'
+        description: 'Hours to look back (ignored if start_date set)'
         required: false
         default: '24'
+      start_date:
+        description: 'Start date (YYYY-MM-DD)'
+        required: false
+      end_date:
+        description: 'End date (YYYY-MM-DD, defaults to now)'
+        required: false
       publish_telegram:
         description: 'Publish to Telegram'
         type: boolean
@@ -41,15 +47,12 @@ env:
   SUBSTACK_PUBLICATION_URL: ${{ vars.SUBSTACK_PUBLICATION_URL }}
 
 jobs:
-  # --- Read channels + generate both digests ---
-  curate:
+  # --- Step 1: Read sources ---
+  read:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -57,7 +60,30 @@ jobs:
         run: |
           cd agent/integrations/telegram
           pip install -r requirements.txt
-          python telegram.py --read --since ${{ github.event.inputs.since_hours || '24' }}
+          if [ -n "${{ github.event.inputs.start_date }}" ]; then
+            ARGS="--start-date ${{ github.event.inputs.start_date }}"
+            [ -n "${{ github.event.inputs.end_date }}" ] && ARGS="$ARGS --end-date ${{ github.event.inputs.end_date }}"
+            python telegram.py --read $ARGS
+          else
+            python telegram.py --read --since ${{ github.event.inputs.since_hours || '24' }}
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: messages
+          path: /tmp/telegram_messages.json
+          retention-days: 1
+
+  # --- Step 2a: Generate messenger content (short, emoji, links) ---
+  generate-messenger:
+    needs: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: messages
+          path: /tmp
 
       - name: Generate Telegram digest
         uses: AICMO/llm-call-action@v1
@@ -75,6 +101,24 @@ jobs:
           google_application_credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
           vertex_project: ${{ vars.VERTEX_PROJECT }}
           vertex_region: ${{ vars.VERTEX_REGION }}
+          max_turns: '12'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: messenger-digest
+          path: /tmp/telegram_digest.txt
+          retention-days: 1
+
+  # --- Step 2b: Generate blog content (long-form newsletter) ---
+  generate-blog:
+    needs: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: messages
+          path: /tmp
 
       - name: Generate blog digest
         uses: AICMO/llm-call-action@v1
@@ -92,19 +136,17 @@ jobs:
           google_application_credentials_json: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
           vertex_project: ${{ vars.VERTEX_PROJECT }}
           vertex_region: ${{ vars.VERTEX_REGION }}
+          max_turns: '12'
 
-      - name: Upload digests
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
-          name: digests
-          path: |
-            /tmp/telegram_digest.txt
-            /tmp/blog_digest.txt
+          name: blog-digest
+          path: /tmp/blog_digest.txt
           retention-days: 1
 
-  # --- Publish to Telegram ---
+  # --- Step 3a: Publish to Telegram ---
   publish-telegram:
-    needs: curate
+    needs: generate-messenger
     if: ${{ github.event.inputs.publish_telegram != 'false' }}
     runs-on: ubuntu-latest
     steps:
@@ -114,7 +156,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v7
         with:
-          name: digests
+          name: messenger-digest
       - name: Publish
         run: |
           cp telegram_digest.txt /tmp/llm_response.txt
@@ -122,9 +164,9 @@ jobs:
           pip install -r requirements.txt
           python telegram.py --post
 
-  # --- Publish to Ghost ---
+  # --- Step 3b: Publish to Ghost ---
   publish-ghost:
-    needs: curate
+    needs: generate-blog
     if: ${{ github.event.inputs.publish_ghost != 'false' }}
     runs-on: ubuntu-latest
     steps:
@@ -134,16 +176,16 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v7
         with:
-          name: digests
+          name: blog-digest
       - name: Publish
         run: |
           cp blog_digest.txt /tmp/llm_response.txt
           pip install -r agent/integrations/ghost/requirements.txt
           python agent/integrations/ghost/ghost.py --post
 
-  # --- Publish to Substack ---
+  # --- Step 3c: Publish to Substack ---
   publish-substack:
-    needs: curate
+    needs: generate-blog
     if: ${{ github.event.inputs.publish_substack != 'false' }}
     runs-on: self-hosted
     steps:
@@ -153,7 +195,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v7
         with:
-          name: digests
+          name: blog-digest
       - name: Publish
         run: |
           cp blog_digest.txt /tmp/llm_response.txt

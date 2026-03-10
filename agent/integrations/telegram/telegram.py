@@ -2,8 +2,10 @@
 """Telegram AI Content Curator — single entry point.
 
 Usage:
-  python telegram.py --read --since 6     # Read channels → /tmp/telegram_messages.json
-  python telegram.py --post               # Publish /tmp/llm_response.txt to channel
+  python telegram.py --read --since 6                          # Last N hours
+  python telegram.py --read --start-date 2026-03-01            # From date to now
+  python telegram.py --read --start-date 2026-03-01 --end-date 2026-03-05  # Date range
+  python telegram.py --post                                    # Publish digest
 """
 
 import argparse
@@ -49,7 +51,7 @@ def get_telegram_client():
 # READ: --read
 # ============================================================
 
-async def cmd_read(since_hours: float):
+async def cmd_read(since_hours: float, start_date: str = None, end_date: str = None):
     client = get_telegram_client()
     await client.connect()
 
@@ -61,7 +63,16 @@ async def cmd_read(since_hours: float):
     me = await client.get_me()
     print(f"Logged in as {me.first_name} (@{me.username or 'no_username'})")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    if start_date:
+        cutoff = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        cutoff_end = (
+            datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+            if end_date
+            else datetime.now(timezone.utc)
+        )
+    else:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        cutoff_end = datetime.now(timezone.utc)
     publish_channel = os.environ.get("TELEGRAM_PUBLISH_CHANNEL", "").lstrip("@").lower()
 
     channels = []
@@ -82,8 +93,11 @@ async def cmd_read(since_hours: float):
 
         try:
             async for message in client.iter_messages(dialog.entity, limit=100):
-                if message.date.replace(tzinfo=timezone.utc) < cutoff:
+                msg_date = message.date.replace(tzinfo=timezone.utc)
+                if msg_date < cutoff:
                     break
+                if msg_date > cutoff_end:
+                    continue
 
                 total_read += 1
 
@@ -226,6 +240,8 @@ def main():
     parser = argparse.ArgumentParser(description="Telegram AI Content Curator")
     parser.add_argument("--read", action="store_true", help="Read channels → /tmp/telegram_messages.json")
     parser.add_argument("--since", type=float, default=6, help="Hours to look back (default: 6)")
+    parser.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD), overrides --since")
+    parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD, defaults to now)")
     parser.add_argument("--post", action="store_true", help="Publish /tmp/llm_response.txt to channel")
     parser.add_argument("--list-channels", action="store_true", help="List all subscribed broadcast channels")
     args = parser.parse_args()
@@ -237,7 +253,7 @@ def main():
     if args.list_channels:
         asyncio.run(cmd_list_channels())
     elif args.read:
-        asyncio.run(cmd_read(args.since))
+        asyncio.run(cmd_read(args.since, start_date=args.start_date, end_date=args.end_date))
     elif args.post:
         asyncio.run(cmd_post())
 

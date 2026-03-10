@@ -260,7 +260,7 @@ def cmd_post(draft_only: bool = False):
     print(f"Authenticated as user {api.user_id}")
 
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
-    title = f"AI Digest — {today}"
+    title = f"[Daily] AI Digest — {today}"
 
     body_content = html_to_prosemirror(digest_text)
     print(f"Content: {len(digest_text)} chars → {len(body_content)} ProseMirror nodes")

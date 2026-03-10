@@ -232,7 +232,7 @@ def cmd_post(draft_only: bool = False, custom_title: str = None):
     api = GhostApi(api_url=api_url, admin_api_key=admin_key)
 
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
-    title = custom_title or f"AI Digest — {today}"
+    title = custom_title or f"[Daily] AI Digest — {today}"
     lexical = html_to_lexical(digest_text)
     print(f"Content: {len(digest_text)} chars → {len(lexical)} chars Lexical")
 

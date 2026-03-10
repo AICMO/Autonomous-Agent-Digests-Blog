@@ -14,6 +14,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, unquote
 
@@ -122,15 +123,8 @@ class SubstackApi:
     def _post(self, url, **kwargs):
         return self._handle(self._session.post(url, **kwargs))
 
-    def create_draft(self, title, subtitle, paragraphs):
-        """Create a draft post from a list of paragraph strings."""
-        body_content = []
-        for text in paragraphs:
-            body_content.append({
-                "type": "paragraph",
-                "content": [{"type": "text", "text": text}],
-            })
-
+    def create_draft(self, title, subtitle, body_content):
+        """Create a draft post. body_content: list of ProseMirror nodes."""
         draft_body = {
             "draft_title": title,
             "draft_subtitle": subtitle,
@@ -148,6 +142,90 @@ class SubstackApi:
             f"{self.publication_api}/drafts/{draft_id}/publish",
             json={"send": send_email, "share_automatically": False},
         )
+
+
+# ============================================================
+# HTML → Substack ProseMirror converter
+# ============================================================
+
+class _HTMLToProseMirror(HTMLParser):
+    """Parse HTML into Substack ProseMirror JSON nodes."""
+
+    def __init__(self):
+        super().__init__()
+        self.nodes = []          # top-level ProseMirror block nodes
+        self.inline = []         # inline content for current block
+        self.list_items = []     # collected list items
+        self.list_tag = None     # "ol" or "ul"
+        self.block_tag = None    # current block tag
+        self.marks = []          # active inline marks stack
+
+    def _flush_block(self):
+        if not self.inline:
+            return
+        content = list(self.inline)
+        self.inline.clear()
+
+        if self.block_tag in ("h1", "h2", "h3", "h4"):
+            level = int(self.block_tag[1])
+            self.nodes.append({"type": "heading", "attrs": {"level": level}, "content": content})
+        elif self.block_tag == "li":
+            self.list_items.append({"type": "list_item", "content": [{"type": "paragraph", "content": content}]})
+        else:
+            self.nodes.append({"type": "paragraph", "content": content})
+        self.block_tag = None
+
+    def _flush_list(self):
+        if not self.list_items:
+            return
+        list_type = "ordered_list" if self.list_tag == "ol" else "bullet_list"
+        self.nodes.append({"type": list_type, "content": list(self.list_items)})
+        self.list_items.clear()
+        self.list_tag = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs_d = dict(attrs)
+        if tag in ("h1", "h2", "h3", "h4", "p"):
+            self.block_tag = tag
+        elif tag in ("ol", "ul"):
+            self.list_tag = tag
+        elif tag == "li":
+            self.block_tag = "li"
+        elif tag in ("strong", "b"):
+            self.marks.append({"type": "bold"})
+        elif tag in ("em", "i"):
+            self.marks.append({"type": "italic"})
+        elif tag == "a":
+            self.marks.append({"type": "link", "attrs": {"href": attrs_d.get("href", "")}})
+
+    def handle_endtag(self, tag):
+        if tag in ("h1", "h2", "h3", "h4", "p", "li"):
+            self._flush_block()
+        elif tag in ("ol", "ul"):
+            self._flush_list()
+        elif tag in ("strong", "b"):
+            self.marks = [m for m in self.marks if m["type"] != "bold"]
+        elif tag in ("em", "i"):
+            self.marks = [m for m in self.marks if m["type"] != "italic"]
+        elif tag == "a":
+            self.marks = [m for m in self.marks if m["type"] != "link"]
+
+    def handle_data(self, data):
+        if not data.strip() and not self.block_tag:
+            return
+        node = {"type": "text", "text": data}
+        if self.marks:
+            node["marks"] = list(self.marks)
+        self.inline.append(node)
+
+
+def html_to_prosemirror(html: str) -> list:
+    """Convert HTML string to list of Substack ProseMirror nodes."""
+    parser = _HTMLToProseMirror()
+    parser.feed(html)
+    parser._flush_block()
+    parser._flush_list()
+    return parser.nodes
 
 
 # ============================================================
@@ -184,9 +262,10 @@ def cmd_post(draft_only: bool = False):
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
     title = f"AI Digest — {today}"
 
-    paragraphs = [line.strip() for line in digest_text.split("\n") if line.strip()]
+    body_content = html_to_prosemirror(digest_text)
+    print(f"Content: {len(digest_text)} chars → {len(body_content)} ProseMirror nodes")
 
-    draft = api.create_draft(title=title, subtitle="", paragraphs=paragraphs)
+    draft = api.create_draft(title=title, subtitle="", body_content=body_content)
     draft_id = draft.get("id")
     print(f"Draft created: id={draft_id}")
 

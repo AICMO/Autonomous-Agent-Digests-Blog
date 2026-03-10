@@ -50,8 +50,8 @@ jobs:
 
       - name: Publish to Ghost
         run: |
+          ARGS="--post --title 'TEST: Ghost Pipeline'"
           if [ "${{ github.event.inputs.draft_only }}" = "true" ]; then
-            python agent/integrations/ghost/ghost.py --post --draft
-          else
-            python agent/integrations/ghost/ghost.py --post
+            ARGS="$ARGS --draft"
           fi
+          python agent/integrations/ghost/ghost.py $ARGS

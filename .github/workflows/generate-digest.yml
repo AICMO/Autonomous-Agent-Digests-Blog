@@ -89,7 +89,7 @@ jobs:
       - name: Generate Telegram digest
         uses: AICMO/llm-call-action@v1
         with:
-          prompt_file: .github/prompts/curate-digest-telegram.md
+          prompt_file: .github/prompts/generate-digest-messenger.md
           data_file: /tmp/telegram_messages.json
           output_file: /tmp/telegram_digest.txt
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -126,7 +126,7 @@ jobs:
       - name: Generate blog digest
         uses: AICMO/llm-call-action@v1
         with:
-          prompt_file: .github/prompts/curate-digest-substack.md
+          prompt_file: .github/prompts/generate-digest-blog.md
           data_file: /tmp/telegram_messages.json
           output_file: /tmp/blog_digest.txt
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

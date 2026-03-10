@@ -15,6 +15,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 import requests
@@ -91,64 +92,121 @@ class GhostApi:
     def _put(self, path, **kwargs):
         return self._handle(requests.put(f"{self.admin_url}{path}", headers=self._headers(), **kwargs))
 
-    def create_post(self, title: str, html: str, status: str = "draft"):
+    def create_post(self, title: str, lexical: str, status: str = "draft"):
         """Create a post. status: 'draft' or 'published'."""
         payload = {
             "posts": [{
                 "title": title,
-                "html": html,
+                "lexical": lexical,
                 "status": status,
-                "source": "html",
             }]
         }
         return self._post("/posts/", json=payload)
 
 
 # ============================================================
-# Content formatting
+# HTML → Ghost Lexical converter
 # ============================================================
 
-def digest_to_html(text: str) -> str:
-    """Convert plain-text LLM digest to HTML for Ghost."""
-    lines = text.split("\n")
-    html_parts = []
-    in_list = False
+# Lexical format bitmask: bold=1, italic=2
+FORMAT_BOLD = 1
+FORMAT_ITALIC = 2
 
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if in_list:
-                html_parts.append("</ol>")
-                in_list = False
-            continue
 
-        # Numbered list items (e.g. "1. Item text")
-        if len(stripped) > 2 and stripped[0].isdigit() and ". " in stripped[:5]:
-            if not in_list:
-                html_parts.append("<ol>")
-                in_list = True
-            item_text = stripped.split(". ", 1)[1]
-            html_parts.append(f"<li>{item_text}</li>")
-        # Headings (lines that are short and don't end with punctuation)
-        elif len(stripped) < 80 and not stripped[-1] in ".,;:!?" and not in_list:
-            html_parts.append(f"<h2>{stripped}</h2>")
+def _text_node(text, fmt=0):
+    return {"detail": 0, "format": fmt, "mode": "normal", "style": "", "text": text, "type": "extended-text", "version": 1}
+
+
+def _link_node(url, children):
+    return {"children": children, "direction": None, "format": "", "indent": 0, "type": "link", "version": 1, "rel": "noopener", "target": None, "title": None, "url": url}
+
+
+class _HTMLToLexical(HTMLParser):
+    """Parse HTML into Ghost Lexical JSON nodes."""
+
+    def __init__(self):
+        super().__init__()
+        self.nodes = []          # top-level Lexical block nodes
+        self.inline = []         # inline children for current block
+        self.list_items = []     # collected list items
+        self.list_tag = None     # "ol" or "ul"
+        self.block_tag = None    # current block tag (p, h2, h3, li)
+        self.fmt = 0             # current inline format bitmask
+        self.link_url = None     # current <a> href
+
+    def _flush_block(self):
+        if not self.inline:
+            return
+        children = list(self.inline)
+        self.inline.clear()
+
+        if self.block_tag in ("h1", "h2", "h3", "h4"):
+            self.nodes.append({"children": children, "direction": None, "format": "", "indent": 0, "type": "heading", "tag": self.block_tag, "version": 1})
+        elif self.block_tag == "li":
+            self.list_items.append({"children": children, "direction": None, "format": "", "indent": 0, "type": "listitem", "value": len(self.list_items) + 1, "version": 1})
         else:
-            if in_list:
-                html_parts.append("</ol>")
-                in_list = False
-            html_parts.append(f"<p>{stripped}</p>")
+            self.nodes.append({"children": children, "direction": None, "format": "", "indent": 0, "type": "paragraph", "version": 1})
+        self.block_tag = None
 
-    if in_list:
-        html_parts.append("</ol>")
+    def _flush_list(self):
+        if not self.list_items:
+            return
+        list_type = "number" if self.list_tag == "ol" else "bullet"
+        self.nodes.append({"children": list(self.list_items), "direction": None, "format": "", "indent": 0, "type": "list", "listType": list_type, "start": 1, "tag": self.list_tag or "ol", "version": 1})
+        self.list_items.clear()
+        self.list_tag = None
 
-    return "\n".join(html_parts)
+    def handle_starttag(self, tag, attrs):
+        attrs_d = dict(attrs)
+        if tag in ("h1", "h2", "h3", "h4", "p"):
+            self.block_tag = tag
+        elif tag in ("ol", "ul"):
+            self.list_tag = tag
+        elif tag == "li":
+            self.block_tag = "li"
+        elif tag in ("strong", "b"):
+            self.fmt |= FORMAT_BOLD
+        elif tag in ("em", "i"):
+            self.fmt |= FORMAT_ITALIC
+        elif tag == "a":
+            self.link_url = attrs_d.get("href")
+
+    def handle_endtag(self, tag):
+        if tag in ("h1", "h2", "h3", "h4", "p", "li"):
+            self._flush_block()
+        elif tag in ("ol", "ul"):
+            self._flush_list()
+        elif tag in ("strong", "b"):
+            self.fmt &= ~FORMAT_BOLD
+        elif tag in ("em", "i"):
+            self.fmt &= ~FORMAT_ITALIC
+        elif tag == "a":
+            self.link_url = None
+
+    def handle_data(self, data):
+        if not data.strip() and not self.block_tag:
+            return
+        if self.link_url:
+            self.inline.append(_link_node(self.link_url, [_text_node(data, self.fmt)]))
+        else:
+            self.inline.append(_text_node(data, self.fmt))
+
+
+def html_to_lexical(html: str) -> str:
+    """Convert HTML string to Ghost Lexical JSON string."""
+    parser = _HTMLToLexical()
+    parser.feed(html)
+    parser._flush_block()
+    parser._flush_list()
+    root = {"root": {"children": parser.nodes, "direction": None, "format": "", "indent": 0, "type": "root", "version": 1}}
+    return json.dumps(root)
 
 
 # ============================================================
 # CLI
 # ============================================================
 
-def cmd_post(draft_only: bool = False):
+def cmd_post(draft_only: bool = False, custom_title: str = None):
     if not LLM_RESPONSE_TMP.exists():
         print(f"Error: {LLM_RESPONSE_TMP} not found. Run the LLM pipeline first.")
         sys.exit(1)
@@ -159,6 +217,8 @@ def cmd_post(draft_only: bool = False):
         return
 
     api_url = os.environ.get("GHOST_URL", "").strip()
+    if api_url and not api_url.startswith("http"):
+        api_url = f"https://{api_url}"
     admin_key = os.environ.get("GHOST_ADMIN_API_KEY", "").strip()
 
     if not api_url:
@@ -172,20 +232,18 @@ def cmd_post(draft_only: bool = False):
     api = GhostApi(api_url=api_url, admin_api_key=admin_key)
 
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
-    title = f"AI Digest — {today}"
-    html = digest_to_html(digest_text)
-    print(f"Content: {len(digest_text)} chars → {len(html)} chars HTML")
+    title = custom_title or f"AI Digest — {today}"
+    lexical = html_to_lexical(digest_text)
+    print(f"Content: {len(digest_text)} chars → {len(lexical)} chars Lexical")
 
     status = "draft" if draft_only else "published"
-    result = api.create_post(title=title, html=html, status=status)
+    result = api.create_post(title=title, lexical=lexical, status=status)
 
     post = result["posts"][0]
-    post_url = post.get("url", "")
-
     if draft_only:
         print(f"Draft created: {api_url}/ghost/#/editor/post/{post['id']}")
     else:
-        print(f"Published: {post_url}")
+        print(f"Published: {post.get('url', '')}")
 
     print("Done.")
 
@@ -194,13 +252,14 @@ def main():
     parser = argparse.ArgumentParser(description="Ghost Publisher")
     parser.add_argument("--post", action="store_true", help="Publish /tmp/llm_response.txt to Ghost")
     parser.add_argument("--draft", action="store_true", help="Create draft only, don't publish")
+    parser.add_argument("--title", type=str, help="Custom post title (default: AI Digest — <date>)")
     args = parser.parse_args()
 
     if not args.post:
         parser.print_help()
         sys.exit(1)
 
-    cmd_post(draft_only=args.draft)
+    cmd_post(draft_only=args.draft, custom_title=args.title)
 
 
 if __name__ == "__main__":

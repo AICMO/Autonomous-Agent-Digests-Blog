@@ -58,7 +58,7 @@ class GhostApi:
         self._get("/site/")
         newsletters = self._get("/newsletters/").get("newsletters", [])
         self.newsletter_slug = newsletters[0]["slug"] if newsletters else None
-        print(f"Connected to {self.api_url}")
+        print(f"Connected to {self.api_url} (newsletter: {self.newsletter_slug})")
 
     def _make_token(self):
         """Create a short-lived JWT for Ghost Admin API (HS256, no dependencies)."""
@@ -95,20 +95,28 @@ class GhostApi:
         return self._handle(requests.put(f"{self.admin_url}{path}", headers=self._headers(), **kwargs))
 
     def create_post(self, title: str, lexical: str, status: str = "draft", newsletter_slug: str = None):
-        """Create a post. status: 'draft' or 'published'. newsletter_slug sends email to subscribers."""
-        post = {
-            "title": title,
-            "lexical": lexical,
-            "status": status,
-        }
-        if newsletter_slug and status == "published":
-            post["email_segment"] = "all"
+        """Create a post. For published + email: creates draft first, then publishes via PUT."""
+        if status == "published" and newsletter_slug:
+            # Step 1: create as draft
+            draft = self._post("/posts/", json={"posts": [{
+                "title": title,
+                "lexical": lexical,
+                "status": "draft",
+            }]})
+            post = draft["posts"][0]
 
-        path = "/posts/"
-        if newsletter_slug and status == "published":
-            path = f"/posts/?newsletter={newsletter_slug}"
-
-        return self._post(path, json={"posts": [post]})
+            # Step 2: publish with newsletter (triggers email)
+            return self._put(
+                f"/posts/{post['id']}/",
+                json={"posts": [{"status": "published", "email_segment": "all", "updated_at": post["updated_at"]}]},
+                params={"newsletter": newsletter_slug},
+            )
+        else:
+            return self._post("/posts/", json={"posts": [{
+                "title": title,
+                "lexical": lexical,
+                "status": status,
+            }]})
 
 
 # ============================================================
@@ -275,10 +283,15 @@ def cmd_post(draft_only: bool = False, custom_title: str = None, since_hours: fl
         print(f"Email sent to newsletter: {api.newsletter_slug}")
 
     post = result["posts"][0]
+    email = post.get("email")
     if draft_only:
         print(f"Draft created: {api_url}/ghost/#/editor/post/{post['id']}")
     else:
         print(f"Published: {post.get('url', '')}")
+        if email:
+            print(f"Email status: {email.get('status', 'unknown')}")
+        elif api.newsletter_slug:
+            print("WARNING: No email object in response — email may not have been sent")
 
     print("Done.")
 

@@ -71,9 +71,11 @@ See [agent/integrations/substack/README.md](agent/integrations/substack/README.m
 
 ### 5. Run
 
-Runs automatically daily at 6:00 UTC. Manual: Actions → "Generate Digest" → Run workflow.
-
+**Daily digest**: Runs automatically at 4:00 UTC. Manual: Actions → "Generate Daily Digest" → Run workflow.
 Supports workflow dispatch inputs: `since_hours`, `start_date`, `end_date`, and per-platform publish toggles.
+
+**Weekly digest**: Runs automatically Saturday at 6:00 UTC. Manual: Actions → "Generate Weekly Digest" → Run workflow.
+Reads published daily digests from the publish channel, resolves t.me source links, and synthesizes a thematic weekly roundup. Supports `start_date`, `end_date`, and per-platform publish toggles.
 
 ### 6. Backfill
 
@@ -107,10 +109,13 @@ infra/
   scripts/
     backfill-digests.sh           # backfill past digests sequentially
   prompts/
-    generate-digest-messenger.md  # Telegram digest prompt (short, emoji, links)
-    generate-digest-blog.md       # Blog digest prompt (long-form HTML)
+    generate-digest-daily-messenger.md   # Daily Telegram prompt (short, emoji, links)
+    generate-digest-daily-blog.md        # Daily blog prompt (long-form HTML)
+    generate-digest-weekly-messenger.md  # Weekly Telegram prompt (thematic roundup)
+    generate-digest-weekly-blog.md       # Weekly blog prompt (thematic HTML, source links)
   workflows/
-    generate-digest.yml           # daily pipeline
+    generate-digest-daily.yml     # daily pipeline (4:00 UTC)
+    generate-digest-weekly.yml    # weekly pipeline (Saturday 6:00 UTC)
     test-ghost.yml                # manual Ghost test
     test-substack.yml             # manual Substack test
 ```

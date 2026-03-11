@@ -1,8 +1,8 @@
-name: Generate Digest
+name: Generate Daily Digest
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # Daily at 6:00 UTC
+    - cron: '0 4 * * *'  # Daily at 4:00 UTC
   workflow_dispatch:
     inputs:
       since_hours:
@@ -90,7 +90,7 @@ jobs:
       - name: Generate Telegram digest
         uses: AICMO/llm-call-action@v1
         with:
-          prompt_file: .github/prompts/generate-digest-messenger.md
+          prompt_file: .github/prompts/generate-digest-daily-messenger.md
           data_file: /tmp/telegram_messages.json
           output_file: /tmp/telegram_digest.txt
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -127,7 +127,7 @@ jobs:
       - name: Generate blog digest
         uses: AICMO/llm-call-action@v1
         with:
-          prompt_file: .github/prompts/generate-digest-blog.md
+          prompt_file: .github/prompts/generate-digest-daily-blog.md
           data_file: /tmp/telegram_messages.json
           output_file: /tmp/blog_digest.txt
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

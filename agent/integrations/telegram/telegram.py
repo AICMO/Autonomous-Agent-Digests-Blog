@@ -5,6 +5,8 @@ Usage:
   python telegram.py --read --since 6                          # Last N hours
   python telegram.py --read --start-date 2026-03-01            # From date to now
   python telegram.py --read --start-date 2026-03-01 --end-date 2026-03-05  # Date range
+  python telegram.py --read --channel @my_channel --since 168  # Read specific channel
+  python telegram.py --read --channel @my_channel --resolve-links  # Resolve t.me links
   python telegram.py --post                                    # Publish digest
 """
 
@@ -12,6 +14,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,7 +54,48 @@ def get_telegram_client():
 # READ: --read
 # ============================================================
 
-async def cmd_read(since_hours: float, start_date: str = None, end_date: str = None):
+TG_LINK_RE = re.compile(r"https://t\.me/([a-zA-Z0-9_]+)/(\d+)")
+
+
+async def _resolve_links(client, collected):
+    """Scan collected messages for t.me links and fetch original content."""
+    all_links = []
+    for msg in collected:
+        links = TG_LINK_RE.findall(msg.get("text", ""))
+        for channel_username, msg_id_str in links:
+            all_links.append((msg, channel_username, int(msg_id_str)))
+
+    if not all_links:
+        print("No t.me links found to resolve.")
+        return
+
+    print(f"\nResolving {len(all_links)} t.me links...")
+    resolved_count = 0
+
+    for msg, channel_username, msg_id in all_links:
+        try:
+            entity = await client.get_entity(channel_username)
+            original = await client.get_messages(entity, ids=msg_id)
+            if original and (original.text or original.raw_text):
+                resolved = {
+                    "url": f"https://t.me/{channel_username}/{msg_id}",
+                    "channel": channel_username,
+                    "text": original.text or original.raw_text,
+                }
+                msg.setdefault("resolved_links", []).append(resolved)
+                resolved_count += 1
+            await asyncio.sleep(0.5)
+        except errors.FloodWaitError as e:
+            print(f"  FloodWait: sleeping {e.seconds}s resolving {channel_username}/{msg_id}")
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            print(f"  Could not resolve https://t.me/{channel_username}/{msg_id}: {e}")
+
+    print(f"Resolved {resolved_count}/{len(all_links)} links")
+
+
+async def cmd_read(since_hours: float, start_date: str = None, end_date: str = None,
+                   channel: str = None, resolve_links: bool = False):
     client = get_telegram_client()
     await client.connect()
 
@@ -73,26 +117,38 @@ async def cmd_read(since_hours: float, start_date: str = None, end_date: str = N
     else:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
         cutoff_end = datetime.now(timezone.utc)
-    publish_channel = os.environ.get("TELEGRAM_PUBLISH_CHANNEL", "").lstrip("@").lower()
 
-    channels = []
-    async for dialog in client.iter_dialogs():
-        if isinstance(dialog.entity, Channel) and dialog.entity.broadcast:
-            username = (getattr(dialog.entity, "username", None) or "").lower()
-            if username and username == publish_channel:
-                continue
-            channels.append(dialog)
-
-    print(f"Scanning {len(channels)} channels since {cutoff.strftime('%Y-%m-%d %H:%M UTC')}...\n")
+    # Build channel list: single channel (--channel) or all subscribed
+    if channel:
+        try:
+            entity = await client.get_entity(channel)
+            channels = [(entity, getattr(entity, "title", channel))]
+        except Exception as e:
+            print(f"ERROR: Could not resolve channel {channel}: {e}")
+            await client.disconnect()
+            return
+        print(f"Reading channel {channel} since {cutoff.strftime('%Y-%m-%d %H:%M UTC')}...\n")
+    else:
+        publish_channel = os.environ.get("TELEGRAM_PUBLISH_CHANNEL", "").lstrip("@").lower()
+        channel_list = []
+        async for dialog in client.iter_dialogs():
+            if isinstance(dialog.entity, Channel) and dialog.entity.broadcast:
+                username = (getattr(dialog.entity, "username", None) or "").lower()
+                if username and username == publish_channel:
+                    continue
+                channel_list.append(dialog)
+        channels = [(d.entity, d.title) for d in channel_list]
+        print(f"Scanning {len(channels)} channels since {cutoff.strftime('%Y-%m-%d %H:%M UTC')}...\n")
 
     collected = []
     total_read = 0
 
-    for dialog in channels:
+    for entity, title in channels:
         channel_collected = 0
+        username = getattr(entity, "username", None)
 
         try:
-            async for message in client.iter_messages(dialog.entity, limit=100):
+            async for message in client.iter_messages(entity, limit=100):
                 msg_date = message.date.replace(tzinfo=timezone.utc)
                 if msg_date < cutoff:
                     break
@@ -109,25 +165,28 @@ async def cmd_read(since_hours: float, start_date: str = None, end_date: str = N
                     continue
 
                 collected.append({
-                    "channel_title": dialog.title,
-                    "channel_username": getattr(dialog.entity, "username", None),
+                    "channel_title": title,
+                    "channel_username": username,
                     "message_id": message.id,
                     "date": message.date.isoformat(),
                     "text": text,
-                    "url": f"https://t.me/{dialog.entity.username}/{message.id}" if dialog.entity.username else None,
+                    "url": f"https://t.me/{username}/{message.id}" if username else None,
                 })
                 channel_collected += 1
 
         except errors.FloodWaitError as e:
-            print(f"  FloodWait: sleeping {e.seconds}s for {dialog.title}")
+            print(f"  FloodWait: sleeping {e.seconds}s for {title}")
             await asyncio.sleep(e.seconds)
         except Exception as e:
-            print(f"  Error reading {dialog.title}: {e}")
+            print(f"  Error reading {title}: {e}")
 
         if channel_collected:
-            print(f"  {dialog.title}: {channel_collected} messages")
+            print(f"  {title}: {channel_collected} messages")
 
         await asyncio.sleep(1)
+
+    if resolve_links:
+        await _resolve_links(client, collected)
 
     await client.disconnect()
 
@@ -242,6 +301,8 @@ def main():
     parser.add_argument("--since", type=float, default=6, help="Hours to look back (default: 6)")
     parser.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD), overrides --since")
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD, defaults to now)")
+    parser.add_argument("--channel", type=str, help="Read from a specific channel (e.g. @my_channel)")
+    parser.add_argument("--resolve-links", action="store_true", help="Resolve t.me links in messages")
     parser.add_argument("--post", action="store_true", help="Publish /tmp/llm_response.txt to channel")
     parser.add_argument("--list-channels", action="store_true", help="List all subscribed broadcast channels")
     args = parser.parse_args()
@@ -253,7 +314,8 @@ def main():
     if args.list_channels:
         asyncio.run(cmd_list_channels())
     elif args.read:
-        asyncio.run(cmd_read(args.since, start_date=args.start_date, end_date=args.end_date))
+        asyncio.run(cmd_read(args.since, start_date=args.start_date, end_date=args.end_date,
+                             channel=args.channel, resolve_links=args.resolve_links))
     elif args.post:
         asyncio.run(cmd_post())
 

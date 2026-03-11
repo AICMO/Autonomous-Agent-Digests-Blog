@@ -8,20 +8,35 @@ Stateless pipeline: read Telegram channels → LLM curates digest → publish to
 - `agent/integrations/ghost/ghost.py` — Ghost publisher (main blog platform, Lexical format)
 - `agent/integrations/substack/substack.py` — Substack publisher (secondary)
 - `agent/integrations/substack/api.py` — Substack API client (vendored from python-substack)
-- `.github/prompts/generate-digest-messenger.md` — Telegram prompt (short, emoji, links)
-- `.github/prompts/generate-digest-blog.md` — Blog prompt (long-form HTML newsletter, used by Ghost and Substack)
-- `.github/workflows/generate-digest.yml` — CI pipeline (daily cron)
+- `.github/prompts/generate-digest-daily-messenger.md` — Daily Telegram prompt (short, emoji, links)
+- `.github/prompts/generate-digest-daily-blog.md` — Daily blog prompt (long-form HTML newsletter, used by Ghost and Substack)
+- `.github/prompts/generate-digest-weekly-messenger.md` — Weekly Telegram prompt (thematic, deeper)
+- `.github/prompts/generate-digest-weekly-blog.md` — Weekly blog prompt (thematic HTML, source links)
+- `.github/workflows/generate-digest-daily.yml` — Daily CI pipeline (4:00 UTC)
+- `.github/workflows/generate-digest-weekly.yml` — Weekly CI pipeline (Saturday 6:00 UTC)
 
-## Pipeline
+## Daily Pipeline
 ```
 1. Collect    telegram.py --read --since 24        → /tmp/telegram_messages.json
-2a. LLM      generate-digest-messenger.md             → /tmp/telegram_digest.txt (plain text)
-2b. LLM      generate-digest-blog.md             → /tmp/blog_digest.txt (HTML)
+2a. LLM      generate-digest-daily-messenger.md        → /tmp/telegram_digest.txt (plain text)
+2b. LLM      generate-digest-daily-blog.md        → /tmp/blog_digest.txt (HTML)
 3a. Publish   telegram.py --post                   → Telegram channel
 3b. Publish   ghost.py --post                      → Ghost blog (main)
 3c. Publish   substack.py --post                   → Substack newsletter (secondary)
 ```
 Steps 2a/2b run in parallel. Steps 3a/3b/3c run in parallel.
+
+## Weekly Pipeline
+```
+1. Collect    telegram.py --read --channel $PUBLISH_CHANNEL --start-date ... --end-date ... --resolve-links
+              → /tmp/telegram_messages.json (daily digests + resolved source links)
+2a. LLM      generate-digest-weekly-messenger.md   → /tmp/telegram_digest.txt (thematic roundup)
+2b. LLM      generate-digest-weekly-blog.md        → /tmp/blog_digest.txt (thematic HTML with source links)
+3a. Publish   telegram.py --post                   → Telegram channel
+3b. Publish   ghost.py --post                      → Ghost blog (title: "[Weekly] AI Digest — ...")
+3c. Publish   substack.py --post                   → Substack newsletter
+```
+Reads published daily digests from the publish channel, resolves t.me links to fetch original source content, then synthesizes a deeper thematic weekly roundup. Runs Saturday 6:00 UTC.
 
 ## Publishing Platforms
 - **Ghost** (aicmo.blog) — main blog, Admin API with JWT auth, content in Lexical JSON format

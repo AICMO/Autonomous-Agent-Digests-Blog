@@ -12,7 +12,7 @@ END_DATE="${2:?Usage: $0 START_DATE END_DATE [--telegram]}"
 PUBLISH_TELEGRAM="${3:-false}"
 [ "$PUBLISH_TELEGRAM" = "--telegram" ] && PUBLISH_TELEGRAM=true
 
-WORKFLOW="Generate Digest"
+WORKFLOW="Generate Daily Digest"
 CURRENT="$START_DATE"
 
 echo "=== Backfill: $START_DATE → $END_DATE ==="

@@ -137,10 +137,19 @@ export TAILSCALE_API_KEY="..."
 bash infra/hetzner-setup.sh my-server
 ```
 
-**Connection stack:** Tailscale + Mosh/SSH + Termius + sshid.io hardware keys
+**Connection stack:** Tailscale + Termius + Mosh/SSH + sshid.io hardware keys
 
 - Provisions Ubuntu 24.04 on Hetzner Cloud via API + cloud-init
 - No public SSH — all access through Tailscale mesh VPN
 - Cloudflare-only HTTP/S, Docker + Compose, fail2ban, unattended upgrades
-- Server auto-appears in Tailscale and `~/.ssh/config`
-- Connect from any device: `mosh evios@my-server` or via Termius
+- Server auto-appears `~/.ssh/config` and in Tailscale
+- Connect via Termius or from any device: `mosh evios@my-server`
+
+### Why these apps?
+
+| Layer | Role | Why |
+|-------|------|-----|
+| **[Tailscale](https://tailscale.com)** | Network + auth | Mesh VPN — no public SSH, servers only reachable from your devices. Identity-based auth with browser re-check (MFA). |
+| **[Termius](https://termius.com)** | Terminal client | Mobile + desktop SSH client with Mosh, tabs, SFTP, snippets. Syncs hosts across devices. Daily driver. |
+| **[Mosh](https://mosh.org)** | Session resilience | Survives Wi-Fi/cellular switches, high latency, and sleep. No dropped sessions. |
+| **[sshid.io](https://sshid.io)** | Mobile key management | Hardware-bound device keys for Termius. Keys never leave the device. One URL to distribute all public keys. |

@@ -9,10 +9,13 @@
 #   - Ubuntu 24.04 with unattended security upgrades (auto-reboot at 02:00)
 #   - Tailscale mesh VPN (private SSH + Mosh access)
 #   - Docker Engine + Compose plugin
+#   - Claude Code (auto-updates)
 #   - Mosh, curl, jq, tmux, git
 #   - Hetzner HW firewall (80/443 only, no public SSH)
 #   - UFW: Cloudflare-only HTTP/S (default) + all traffic on tailscale0
-#   - SSH bound to Tailscale IP only (key-only, no root, no passwords)
+#   - Tailscale SSH as primary (identity-based auth via node keys, no SSH keys needed)
+#   - OpenSSH as dormant fallback (configured, disabled — start manually in emergencies)
+#   - sshid.io hardware keys in authorized_keys (only used by OpenSSH fallback, not Tailscale SSH)
 #   - fail2ban, sysctl hardening, 180-day log retention
 #   - Auto-appends server to ~/.ssh/config
 #
@@ -79,7 +82,7 @@
 #     1. Creates 'evios' user with your SSH key
 #     2. Installs + upgrades system packages
 #     3. Installs Tailscale, joins your tailnet with --ssh
-#     4. Binds SSH to Tailscale IP only (ListenAddress 100.x.y.z)
+#     4. Configures OpenSSH as dormant fallback (disabled, starts manually)
 #     5. Configures UFW (Cloudflare-only HTTP/S by default + everything on tailscale0)
 #     6. Installs Docker + Compose, configures iptables isolation + NAT
 #     7. Enables unattended security upgrades (auto-reboot at 02:00)
@@ -87,7 +90,8 @@
 #     9. Writes completion marker to /var/log/hetzner-setup-done
 #
 # Security:
-#   - SSH: key-only, no root, no passwords, bound to Tailscale IP only
+#   - Tailscale SSH: primary access, auth via node keys (no SSH keys needed), ACL-controlled
+#   - OpenSSH: dormant fallback, disabled by default, key-only, no root, sshid.io hardware keys
 #   - UFW: Cloudflare-only HTTP/S (default) + all on tailscale0 (defense-in-depth)
 #   - Docker: iptables: false + explicit NAT rules (prevents bypassing UFW)
 #   - fail2ban: SSH brute-force protection (ban after 3 attempts for 1h)
@@ -265,10 +269,10 @@ write_files:
     content: |
       {"iptables": false}
 
-  # SSH config template (Tailscale IP filled in at boot)
+  # SSH config (dormant fallback — not started by default)
   - path: /etc/ssh/sshd_config.tpl
     content: |
-      ListenAddress __TS_IP__
+      ListenAddress 0.0.0.0
       PermitRootLogin no
       AllowUsers __SSH_USER__
       PasswordAuthentication no
@@ -299,17 +303,18 @@ write_files:
       TS_IP=$(tailscale ip -4)
       echo "Tailscale connected: $TS_IP"
 
-      # ── SSH: Tailscale interface only ──────────
-      echo "--- Configuring SSH ---"
-      sed "s/__TS_IP__/$TS_IP/" /etc/ssh/sshd_config.tpl > /etc/ssh/sshd_config
+      # ── SSH: configure and disable (dormant fallback) ──
+      echo "--- Configuring SSH (dormant) ---"
+      cp /etc/ssh/sshd_config.tpl /etc/ssh/sshd_config
       rm /etc/ssh/sshd_config.tpl
+      systemctl stop ssh.socket ssh.service
+      systemctl disable ssh.socket ssh.service
+      echo "OpenSSH configured but disabled (Tailscale SSH is primary)"
 
-      # Add SSH.id keys (Termius device keys via Tailscale SSH)
+      # Add SSH.id hardware keys (only used by OpenSSH fallback, not Tailscale SSH)
+      # Tailscale SSH authenticates via node identity, not authorized_keys
       KEYS_DIR="/home/__SSH_USER__/.ssh"
       curl -fs https://sshid.io/__SSH_USER__/ECDSA-SK >> "$KEYS_DIR/authorized_keys" || true
-
-      systemctl restart ssh
-      echo "SSH bound to $TS_IP"
 
       # ── UFW (defense-in-depth) ─────────────────
       echo "--- Configuring UFW ---"
@@ -384,6 +389,17 @@ write_files:
       systemctl enable fail2ban && systemctl restart fail2ban
       sed -Ei 's/(.+rotate).+/\1 180/' /etc/logrotate.d/rsyslog
 
+      # ── Locale + Mosh wrapper (forces UTF-8 regardless of client) ──
+      locale-gen en_US.UTF-8
+      update-locale LANG=en_US.UTF-8
+      mv /usr/bin/mosh-server /usr/bin/mosh-server-real
+      printf '#!/bin/bash\nexport LANG=en_US.UTF-8\nexport LC_ALL=en_US.UTF-8\nexec /usr/bin/mosh-server-real "$@"\n' > /usr/bin/mosh-server
+      chmod +x /usr/bin/mosh-server
+
+      # ── Claude Code ─────────────────────────────
+      echo "--- Installing Claude Code ---"
+      sudo -u __SSH_USER__ bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+
       # ── Done ───────────────────────────────────
       echo "SETUP_COMPLETE $(date -Iseconds)" > /var/log/hetzner-setup-done
       echo "=== Setup Complete ==="
@@ -391,6 +407,14 @@ write_files:
 runcmd:
   - bash /opt/setup.sh 2>&1 | tee /var/log/hetzner-setup.log
   - rm -f /opt/setup.sh
+  - |
+    cat > /home/__SSH_USER__/.bash_aliases << 'ALIASES'
+    alias ll='ls -alF'
+    alias la='ls -A'
+    alias l='ls -CF'
+    c() { IS_SANDBOX=1 claude --continue --dangerously-skip-permissions "$@"; }
+    ALIASES
+    chown __SSH_USER__:__SSH_USER__ /home/__SSH_USER__/.bash_aliases
 CIEOF
 
 # Substitute local values into cloud-init template
@@ -447,12 +471,12 @@ while true; do
   elapsed=$SECONDS
   # Check if server appears in Tailscale
   if tailscale status 2>/dev/null | grep -q "$SERVER_NAME"; then
-    echo -e "\r[${elapsed}s] Tailscale connected!                "
+    printf "\r[%ds] Tailscale connected!                \n" "$elapsed"
     break
   fi
   printf "\r[%ds] Waiting for cloud-init + Tailscale..." "$elapsed"
   if [ "$elapsed" -gt 600 ]; then
-    echo -e "\r[${elapsed}s] Timeout -- check Hetzner console for errors"
+    printf "\r[%ds] Timeout -- check Hetzner console for errors\n" "$elapsed"
     break
   fi
   sleep 5

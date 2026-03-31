@@ -30,6 +30,16 @@
 #
 # Destroy everything (wipes all data):
 #   cd /opt/ghost && docker compose down -v && rm -rf /opt/ghost
+#
+# Update Ghost (patch/minor within same major):
+#   cd /opt/ghost && docker compose pull ghost && docker compose up -d ghost
+#
+# Upgrade Ghost (new major version, e.g. 6→7):
+#   1. Back up:  docker exec ghost-db mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" ghost_db > /tmp/ghost_backup.sql
+#   2. Edit docker-compose.yml: change ghost image tag (e.g. ghost:6 → ghost:7)
+#   3. Pull and restart: docker compose pull ghost && docker compose up -d ghost
+#   4. Check logs:  docker logs ghost --tail 50
+#   If something breaks, restore the backup and revert the image tag.
 # ──────────────────────────────────────────────────
 set -euo pipefail
 

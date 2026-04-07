@@ -1,120 +1,114 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────
-# One-Click Hetzner Server Setup [connection stack: Tailscale + Mosh/SSH + Termius + sshid.io hardware keys]
+# One-Click Hetzner Server Setup
 #
-# Provisions a fully hardened Ubuntu server accessible only via Tailscale.
-# No SSH exposed on public IP — connect with Mosh/SSH through Tailscale.
+# Hardened Ubuntu server accessible only via Tailscale.
+# No SSH on public IP — connect through Tailscale mesh.
 #
-# What you get:
-#   - Ubuntu 24.04 with unattended security upgrades (auto-reboot at 02:00)
-#   - Tailscale mesh VPN (private SSH + Mosh access)
-#   - Docker Engine + Compose plugin
-#   - Claude Code (auto-updates)
-#   - Mosh, curl, jq, tmux, git
-#   - Hetzner HW firewall (80/443 only, no public SSH)
-#   - UFW: Cloudflare-only HTTP/S (default) + all traffic on tailscale0
-#   - OpenSSH bound to Tailscale IP (key-only, no root, no passwords)
-#   - sshid.io hardware keys for Termius mobile access
-#   - fail2ban, sysctl hardening, 180-day log retention
-#   - Auto-appends server to ~/.ssh/config
+# Stack: Tailscale + Mosh/SSH + Docker + Claude Code + GitHub CLI
+#        + Termius + sshid.io hardware keys
 #
-# Prerequisites:
-#   brew install hcloud
-#   export HCLOUD_TOKEN="..."                      # https://console.hetzner.cloud > Security > API Tokens (Read & Write)
-#   export TAILSCALE_API_KEY="tskey-api-..."         # https://login.tailscale.com/admin/settings/keys > API Keys
-#   SSH key uploaded to Hetzner:                   # https://console.hetzner.com > Security > SSH Keys
+# ── Quick Start ──────────────────────────────────
 #
-# Usage:
-#   bash infra/hetzner-setup.sh <server-name>
-#   # ex.: bash infra/hetzner-setup.sh hetzner-server-evios  # Default (cx23, Helsinki)
+#   Prerequisites:
+#     brew install hcloud
+#     export HCLOUD_TOKEN="..."              # https://console.hetzner.cloud > Security > API Tokens
+#     export TAILSCALE_API_KEY="tskey-api-..." # https://login.tailscale.com/admin/settings/keys
+#     SSH key uploaded to Hetzner             # https://console.hetzner.com > Security > SSH Keys
 #
-# Connect (after ~3 min):
-#   mosh evios@<server-name>     # Mosh via Tailscale
-#   ssh evios@<server-name>      # SSH via Tailscale
-#   # Or in Termius: add host <server-name>, enable Mosh
+#   # Ephemeral server (default — TS node auto-removes when offline)
+#   bash infra/hetzner-setup.sh my-sandbox
 #
-# Override defaults:
-#   HCLOUD_SERVER_TYPE=cx32 HCLOUD_LOCATION=fsn1 bash infra/hetzner-setup.sh my-server
-#   CLOUDFLARE_ONLY=false bash infra/hetzner-setup.sh my-server
-#   TIMEZONE=Europe/Kyiv HCLOUD_SSH_KEY=other_key bash infra/hetzner-setup.sh my-server
+#   # Production server (persistent TS node)
+#   TS_EPHEMERAL=false bash infra/hetzner-setup.sh my-prod
 #
-# Config (env vars):
-#   SSH_USER            — server username           (default: evios)
-#   HCLOUD_SERVER_TYPE  — server type               (default: cx23)
-#   HCLOUD_LOCATION     — datacenter location       (default: hel1)
-#   HCLOUD_SSH_KEY      — SSH key name in Hetzner   (default: evios_id_ed25519.pub)
-#   TIMEZONE            — server timezone           (default: UTC)
-#   CLOUDFLARE_ONLY     — restrict HTTP/S to CF     (default: true)
+#   # Production + clone repo
+#   TS_EPHEMERAL=false bash infra/hetzner-setup.sh my-prod
+#   GH_TOKEN=ghp_... bash infra/server-init-repo.sh my-prod owner/repo
 #
-# Destroy:
-#   hcloud server delete <server-name>
-#
-# ── Details ──────────────────────────────────────
-#
-# Server types (HCLOUD_SERVER_TYPE):
-#     cx23   — 2 vCPU,  4GB,  40GB NVMe  ~€3/mo  (default)
-#     cx33   — 4 vCPU,  8GB,  80GB NVMe  ~€7/mo
-#     cax23  — 4 vCPU,  8GB,  80GB NVMe  ~€5/mo  (Arm64)
-#   Full list: https://www.hetzner.com/cloud/ | hcloud server-type list
-#
-# Locations (HCLOUD_LOCATION):
-#     hel1   — Helsinki, FI  (default)
-#     fsn1   — Falkenstein, DE
-#     ash    — Ashburn, US
-#   Full list: hcloud location list
-#
-# Architecture:
-#   Internet --> Hetzner HW FW (80/443 only) --> UFW --> Docker containers
-#                                                  |
-#   You --> Tailscale tunnel --> tailscale0 --> SSH/Mosh (all ports allowed)
-#
-#   Tailscale uses outbound connections (NAT traversal) — works with zero inbound ports.
-#   Mosh UDP traffic (60000-61000) flows through the Tailscale tunnel, not public IP.
-#
-# What happens:
-#   Local machine (hcloud CLI):
-#     1. Creates Hetzner HW firewall — 80/443 only, no public SSH
-#     2. Generates cloud-init with your SSH key, Tailscale auth key, and config
-#     3. Creates Ubuntu 24.04 server with cloud-init user-data + firewall attached
-#
-#   Server (cloud-init, first boot ~3 min):
-#     1. Creates 'evios' user with your SSH key
-#     2. Installs + upgrades system packages
-#     3. Installs Tailscale, joins your tailnet
-#     4. Binds OpenSSH to Tailscale IP only (key-only, no root, sshid.io keys)
-#     5. Configures UFW (Cloudflare-only HTTP/S by default + everything on tailscale0)
-#     6. Installs Docker + Compose, configures iptables isolation + NAT
-#     7. Enables unattended security upgrades (auto-reboot at 02:00)
-#     8. Activates fail2ban, sysctl hardening, 180-day log retention
-#     9. Writes completion marker to /var/log/hetzner-setup-done
-#
-# Security:
-#   - OpenSSH: bound to Tailscale IP, key-only, no root, sshid.io hardware keys
-#   - Tailscale: network layer only (no --ssh), all SSH via OpenSSH
-#   - UFW: Cloudflare-only HTTP/S (default) + all on tailscale0 (defense-in-depth)
-#   - Docker: iptables: false + explicit NAT rules (prevents bypassing UFW)
-#   - fail2ban: SSH brute-force protection (ban after 3 attempts for 1h)
-#   - sysctl: SYN flood protection, IP spoofing, ICMP hardening, martian logging
-#   - Updates: unattended security upgrades with auto-reboot at 02:00
-#   - Logs: 180-day retention
-#
-# Connect (after ~3 min):
-#   tailscale status                       # verify server appeared in your tailnet
+#   # Connect (~3 min)
 #   mosh evios@<server-name>               # Mosh via Tailscale (recommended)
 #   ssh evios@<server-name>                # SSH via Tailscale
-#   Termius: add host '<server-name>', user 'evios', enable Mosh
 #
-# Verify:
-#   ssh evios@<server-name> cat /var/log/hetzner-setup-done
-#   ssh evios@<server-name> cat /var/log/hetzner-setup.log
+#   # Destroy
+#   hcloud server delete <server-name>
 #
-# Deploy Ghost:
-#   scp infra/ghost/{deploy-ghost.sh,docker-compose.yml} evios@<server-name>:/opt/ghost/
-#   ssh evios@<server-name> bash /opt/ghost/deploy-ghost.sh
+# ── Config ───────────────────────────────────────
 #
-# Debug (if Tailscale doesn't appear after 5 min):
-#   Hetzner Console (VNC): https://console.hetzner.cloud
-#   Check logs: cat /var/log/cloud-init-output.log && cat /var/log/hetzner-setup.log
+#   Variable             Default                  Description
+#   ──────────────────   ──────────────────────   ──────────────────────────────────────
+#   BOOTSTRAP_APPS       docker,claude-code,gh    Apps to install (tailscale always included)
+#   TS_EPHEMERAL         true                     Ephemeral (auto-removes) or persistent TS node
+#   TS_TAGS              tag:server               Tailscale ACL tags (empty to skip, auto-checked)
+#   SSH_USER             evios                    Server username
+#   HCLOUD_SERVER_TYPE   cx23                     Server type (2 vCPU, 4GB, ~€3/mo)
+#   HCLOUD_LOCATION      hel1                     Datacenter (hel1/fsn1/ash)
+#   HCLOUD_SSH_KEY       evios_id_ed25519.pub     SSH key name in Hetzner
+#   TIMEZONE             UTC                      Server timezone
+#   CLOUDFLARE_ONLY      true                     Restrict HTTP/S to Cloudflare IPs
+#
+# ── Examples ─────────────────────────────────────
+#
+#   # Bigger server in Germany
+#   HCLOUD_SERVER_TYPE=cx32 HCLOUD_LOCATION=fsn1 bash infra/hetzner-setup.sh my-server
+#
+#   # Open HTTP/S to all (not just Cloudflare)
+#   CLOUDFLARE_ONLY=false bash infra/hetzner-setup.sh my-server
+#
+#   # Docker only — no Claude Code, no gh
+#   BOOTSTRAP_APPS=docker bash infra/hetzner-setup.sh my-minimal
+#
+#   # Clone repo without pre-auth (gh auth login manually after SSH)
+#   bash infra/hetzner-setup.sh my-dev
+#
+# ── What You Get ─────────────────────────────────
+#
+#   Base (always installed):
+#     Ubuntu 24.04, Tailscale, Mosh, curl, jq, tmux, git, UFW, fail2ban
+#     Hetzner HW firewall (80/443 only), OpenSSH on Tailscale IP only
+#     sshid.io hardware keys, sysctl hardening, 180-day log retention
+#     Unattended security upgrades (auto-reboot 02:00)
+#
+#   BOOTSTRAP_APPS (default: docker,claude-code,gh):
+#     docker      — Docker Engine + Compose (iptables isolated, explicit NAT)
+#     claude-code — Claude Code + c() alias (--dangerously-skip-permissions)
+#     gh          — GitHub CLI (+ optional GH_TOKEN auth and GH_REPO clone)
+#
+# ── Architecture ─────────────────────────────────
+#
+#   Internet --> Hetzner HW FW (80/443) --> UFW --> Docker containers
+#   You ------> Tailscale tunnel ---------> SSH/Mosh (all ports on tailscale0)
+#
+# ── Server Types ─────────────────────────────────
+#
+#   cx23  — 2 vCPU, 4GB, 40GB  ~€3/mo (default)
+#   cx33  — 4 vCPU, 8GB, 80GB  ~€7/mo
+#   cax23 — 4 ARM, 8GB, 80GB   ~€5/mo
+#   Full list: hcloud server-type list
+#
+# ── Locations ────────────────────────────────────
+#
+#   hel1 — Helsinki    fsn1 — Falkenstein    ash — Ashburn
+#
+# ── Verify / Debug ───────────────────────────────
+#
+#   ssh evios@<name> cat /var/log/hetzner-setup-done
+#   ssh evios@<name> cat /var/log/hetzner-setup.log
+#   # VNC console: https://console.hetzner.cloud
+#
+# ── Security ─────────────────────────────────────
+#
+#   - No public SSH — OpenSSH bound to Tailscale IP only
+#   - Key-only auth, no root, no forwarding, sshid.io hardware keys
+#   - UFW: Cloudflare-only HTTP/S + all on tailscale0
+#   - Docker: iptables:false + explicit NAT (can't bypass UFW)
+#   - fail2ban: 3 attempts → 1h ban
+#   - Cloud-init secrets: only Tailscale auth key (3-min TTL, one-time)
+#
+# ── Clone a repo after setup ─────────────────────
+#
+#   GH_TOKEN=ghp_... bash infra/server-init-repo.sh <server-name> owner/repo
+#   See infra/server-init-repo.sh for GH_TOKEN creation guide.
 #
 # ──────────────────────────────────────────────────
 set -eo pipefail
@@ -127,7 +121,26 @@ SSH_USER="${SSH_USER:-evios}"
 HCLOUD_SSH_KEY="${HCLOUD_SSH_KEY:-evios_id_ed25519.pub}"
 TIMEZONE="${TIMEZONE:-UTC}"
 CLOUDFLARE_ONLY="${CLOUDFLARE_ONLY:-true}"        # restrict HTTP/S to Cloudflare IPs
+BOOTSTRAP_APPS="${BOOTSTRAP_APPS:-docker,claude-code,gh}"  # comma-separated; tailscale always installed
+TS_EPHEMERAL="${TS_EPHEMERAL:-true}"             # ephemeral TS node (set false for production)
+TS_TAGS="${TS_TAGS:-tag:server}"                  # Tailscale ACL tags (empty to skip)
 FW_NAME="http-s-only-fw"
+
+# Validate BOOTSTRAP_APPS (catch typos early)
+KNOWN_APPS="docker,claude-code,gh"
+for app in $(echo "$BOOTSTRAP_APPS" | tr ',' ' '); do
+  if ! echo ",$KNOWN_APPS," | grep -q ",$app,"; then
+    echo "ERROR: Unknown app '$app' in BOOTSTRAP_APPS"
+    echo "  Known apps: $KNOWN_APPS"
+    exit 1
+  fi
+done
+
+# Validate TS_EPHEMERAL (injected raw into Tailscale API JSON)
+if [ "$TS_EPHEMERAL" != "true" ] && [ "$TS_EPHEMERAL" != "false" ]; then
+  echo "ERROR: TS_EPHEMERAL must be 'true' or 'false', got '$TS_EPHEMERAL'"
+  exit 1
+fi
 
 # ── Validate ────────────────────────────────────
 if [ -z "${HCLOUD_TOKEN:-}" ]; then
@@ -141,12 +154,34 @@ fi
 
 command -v hcloud &>/dev/null || { echo "ERROR: hcloud CLI not found -- brew install hcloud"; exit 1; }
 
-# Generate one-time Tailscale auth key (expires in 5 min)
-echo "--- Generating one-time Tailscale auth key ---"
+# Validate Tailscale ACL tags (if specified)
+if [ -n "$TS_TAGS" ]; then
+  echo "--- Checking Tailscale ACL for '$TS_TAGS' ---"
+  TS_ACL=$(curl -sf "https://api.tailscale.com/api/v2/tailnet/-/acl" \
+    -H "Authorization: Bearer ${TAILSCALE_API_KEY}" 2>/dev/null) || true
+  if [ -n "$TS_ACL" ]; then
+    # Check if the tag is defined in tagOwners
+    TAG_NAME="${TS_TAGS#tag:}"
+    if echo "$TS_ACL" | grep -q "\"tag:${TAG_NAME}\""; then
+      echo "ACL tag '$TS_TAGS' exists"
+    else
+      echo "WARNING: '$TS_TAGS' not found in Tailscale ACLs -- skipping tags"
+      echo "  To fix: add '\"$TS_TAGS\": [\"autogroup:admin\"]' to tagOwners in"
+      echo "  https://login.tailscale.com/admin/acls"
+      TS_TAGS=""
+    fi
+  else
+    echo "WARNING: Could not read Tailscale ACLs (API key may lack acl:read) -- skipping tags"
+    TS_TAGS=""
+  fi
+fi
+
+# Generate one-time Tailscale auth key (expires in 3 min)
+echo "--- Generating one-time Tailscale auth key (ephemeral=$TS_EPHEMERAL) ---"
 TS_RESPONSE=$(curl -s -X POST "https://api.tailscale.com/api/v2/tailnet/-/keys" \
   -H "Authorization: Bearer ${TAILSCALE_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":true,"preauthorized":true}}},"expirySeconds":300}')
+  -d "{\"capabilities\":{\"devices\":{\"create\":{\"reusable\":false,\"ephemeral\":${TS_EPHEMERAL},\"preauthorized\":true}}},\"expirySeconds\":180}")
 
 TAILSCALE_AUTH_KEY=$(echo "$TS_RESPONSE" | grep -o '"key":"[^"]*"' | head -1 | cut -d'"' -f4)
 if [ -z "$TAILSCALE_AUTH_KEY" ]; then
@@ -154,12 +189,12 @@ if [ -z "$TAILSCALE_AUTH_KEY" ]; then
   echo "$TS_RESPONSE"
   exit 1
 fi
-echo "One-time auth key generated (expires in 5 min)"
+echo "One-time auth key generated (expires in 3 min)"
 
 # Check Tailscale hostname not taken
 if tailscale status 2>/dev/null | grep -q " ${SERVER_NAME} "; then
   echo "ERROR: '${SERVER_NAME}' already exists in Tailscale"
-  echo "  Options: use a different name, remove at https://login.tailscale.com/admin/machines, or wait for ephemeral auto-removal (~90 min)"
+  echo "  Options: use a different name, or remove at https://login.tailscale.com/admin/machines"
   exit 1
 fi
 
@@ -179,6 +214,8 @@ echo "Server:    $SERVER_NAME ($SERVER_TYPE @ $SERVER_LOCATION)"
 echo "User:      $SSH_USER"
 echo "Timezone:  $TIMEZONE"
 echo "Firewall:  80/443 only (SSH via Tailscale)"
+echo "Apps:      tailscale (always), $BOOTSTRAP_APPS"
+echo "TS node:   $([ "$TS_EPHEMERAL" = "true" ] && echo "ephemeral" || echo "persistent")"
 echo ""
 
 # ── Hetzner Firewall (80/443 only) ──────────────
@@ -263,11 +300,6 @@ write_files:
       net.ipv4.conf.all.log_martians = 1
       net.ipv4.conf.default.log_martians = 1
 
-  # Docker: prevent bypassing UFW
-  - path: /etc/docker/daemon.json
-    content: |
-      {"iptables": false}
-
   # SSH config (Tailscale IP filled in at boot)
   - path: /etc/ssh/sshd_config.tpl
     content: |
@@ -283,7 +315,7 @@ write_files:
       AllowTcpForwarding no
       AllowAgentForwarding no
       PrintMotd no
-      AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys_sshid .ssh/authorized_keys_sshid
+      AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys_sshid
       AcceptEnv LANG LC_*
       Subsystem sftp /usr/lib/openssh/sftp-server
 
@@ -295,10 +327,16 @@ write_files:
       set -euo pipefail
       echo "=== Server Setup Started $(date -Iseconds) ==="
 
+      # App install helper
+      APPS=",__BOOTSTRAP_APPS__,"
+      has_app() { echo "$APPS" | grep -q ",$1,"; }
+
       # ── Tailscale ──────────────────────────────
       echo "--- Installing Tailscale ---"
       curl -fsSL https://tailscale.com/install.sh | sh
-      tailscale up --auth-key=__TAILSCALE_AUTH_KEY__ --hostname=__SERVER_NAME__ --advertise-tags=tag:server
+      TS_UP_ARGS="--auth-key=__TAILSCALE_AUTH_KEY__ --hostname=__SERVER_NAME__"
+      [ -n "__TS_TAGS__" ] && TS_UP_ARGS="$TS_UP_ARGS --advertise-tags=__TS_TAGS__"
+      tailscale up $TS_UP_ARGS
       TS_IP=$(tailscale ip -4)
       echo "Tailscale connected: $TS_IP"
 
@@ -310,10 +348,16 @@ write_files:
       systemctl restart ssh
       echo "SSH bound to $TS_IP (key-only, no root)"
 
-      # Add SSH.id hardware keys (Termius mobile access, separate file, no comments)
+      # Add SSH.id hardware keys (Termius mobile access, separate file)
       KEYS_DIR="/home/__SSH_USER__/.ssh"
       echo "# __SSH_USER__ - sshid.io keys" > "$KEYS_DIR/authorized_keys_sshid"
-      curl -fs https://sshid.io/__SSH_USER__ | sed 's/ #.*$//' | grep -v '^ *$' >> "$KEYS_DIR/authorized_keys_sshid" || true
+      SSHID_RESPONSE=$(curl -fs https://sshid.io/__SSH_USER__ || true)
+      if [ -n "$SSHID_RESPONSE" ]; then
+        echo "$SSHID_RESPONSE" | grep -E '^(ssh-|ecdsa-|sk-)' >> "$KEYS_DIR/authorized_keys_sshid"
+        echo "sshid.io keys added ($(echo "$SSHID_RESPONSE" | grep -cE '^(ssh-|ecdsa-|sk-)') keys)"
+      else
+        echo "WARNING: sshid.io returned empty response -- skipping hardware keys"
+      fi
       chown __SSH_USER__:__SSH_USER__ "$KEYS_DIR/authorized_keys_sshid"
       chmod 600 "$KEYS_DIR/authorized_keys_sshid"
 
@@ -323,16 +367,22 @@ write_files:
       ufw default allow outgoing
 
       if [ "__CLOUDFLARE_ONLY__" = "true" ]; then
-        # HTTP/S from Cloudflare IPs only
-        CF_IPV4=$(curl -s https://www.cloudflare.com/ips-v4)
-        CF_IPV6=$(curl -s https://www.cloudflare.com/ips-v6)
-        if [ -n "$CF_IPV4" ]; then
+        # HTTP/S from Cloudflare IPs only (retry + validate)
+        CF_IPV4=""
+        for _attempt in 1 2 3; do
+          CF_IPV4=$(curl -sf --retry 2 https://www.cloudflare.com/ips-v4) && break
+          sleep 2
+        done
+        CF_IPV6=$(curl -sf --retry 2 https://www.cloudflare.com/ips-v6) || true
+
+        CF_COUNT=$(echo "$CF_IPV4" | grep -c . || true)
+        if [ -n "$CF_IPV4" ] && [ "$CF_COUNT" -ge 10 ]; then
           for ip in $CF_IPV4 $CF_IPV6; do
             ufw allow from "$ip" to any port 80,443 proto tcp comment 'Cloudflare'
           done
-          echo "HTTP/S restricted to Cloudflare IPs"
+          echo "HTTP/S restricted to Cloudflare IPs ($CF_COUNT IPv4 ranges)"
         else
-          echo "WARNING: Failed to fetch Cloudflare IPs -- allowing all"
+          echo "WARNING: Cloudflare IP list looks wrong ($CF_COUNT ranges, expected 10+) -- allowing all"
           ufw allow 80/tcp comment 'HTTP'
           ufw allow 443/tcp comment 'HTTPS'
         fi
@@ -345,20 +395,29 @@ write_files:
       ufw --force enable
 
       # ── Docker + Compose ───────────────────────
-      echo "--- Installing Docker ---"
-      curl -fsSL https://get.docker.com | sh
-      systemctl enable docker
-      usermod -aG docker __SSH_USER__
-      apt-get install -y docker-compose-plugin
-      systemctl restart docker
+      if has_app docker; then
+        echo "--- Installing Docker ---"
+        curl -fsSL https://get.docker.com | sh
+        mkdir -p /etc/docker
+        echo '{"iptables": false}' > /etc/docker/daemon.json
+        systemctl enable docker
+        usermod -aG docker __SSH_USER__
+        apt-get install -y docker-compose-plugin
+        systemctl restart docker
 
-      # Docker NAT (required when iptables: false)
-      DOCKER_SUB=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || echo "172.17.0.0/16")
-      EXT_IF=$(ip route | awk '/default/ {print $5; exit}')
+        # Docker NAT (required when iptables: false)
+        # Retry bridge inspect — daemon may need a moment after restart
+        DOCKER_SUB=""
+        for _i in 1 2 3; do
+          DOCKER_SUB=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null) && break
+          sleep 2
+        done
+        DOCKER_SUB="${DOCKER_SUB:-172.17.0.0/16}"
+        EXT_IF=$(ip route | awk '/default/ {print $5; exit}')
 
-      BEFORE_RULES=/etc/ufw/before.rules
-      if ! grep -q "Docker NAT" "$BEFORE_RULES" 2>/dev/null; then
-        sed -i "1i\\
+        BEFORE_RULES=/etc/ufw/before.rules
+        if ! grep -q "Docker NAT" "$BEFORE_RULES" 2>/dev/null; then
+          sed -i "1i\\
       # Docker NAT\\
       *nat\\
       :POSTROUTING ACCEPT [0:0]\\
@@ -366,21 +425,26 @@ write_files:
       COMMIT\\
       " "$BEFORE_RULES"
 
-        sed -i "/^# don't delete the 'COMMIT' line/i\\
+          sed -i "/^# don't delete the 'COMMIT' line/i\\
       # Docker forwarding\\
       -A ufw-before-forward -s ${DOCKER_SUB} -o ${EXT_IF} -j ACCEPT\\
       -A ufw-before-forward -d ${DOCKER_SUB} -m state --state RELATED,ESTABLISHED -j ACCEPT" "$BEFORE_RULES"
 
-        ufw reload
+          ufw reload
+        fi
+        echo "Docker installed (iptables isolated, NAT configured)"
+      else
+        echo "--- Skipping Docker (not in BOOTSTRAP_APPS) ---"
       fi
-      echo "Docker installed (iptables isolated, NAT configured)"
 
       # ── Unattended upgrades ────────────────────
+      # Drop-in config (higher priority than 50unattended-upgrades, survives format changes)
       echo "--- Configuring auto-updates ---"
-      CONF=/etc/apt/apt.conf.d/50unattended-upgrades
-      sed -i 's|//Unattended-Upgrade::Automatic-Reboot "false";|Unattended-Upgrade::Automatic-Reboot "true";|g' "$CONF"
-      sed -i 's|//Unattended-Upgrade::Automatic-Reboot-WithUsers "true";|Unattended-Upgrade::Automatic-Reboot-WithUsers "true";|g' "$CONF"
-      sed -i 's|//Unattended-Upgrade::Automatic-Reboot-Time "02:00";|Unattended-Upgrade::Automatic-Reboot-Time "02:00";|g' "$CONF"
+      cat > /etc/apt/apt.conf.d/51auto-reboot << 'AUTOREBOOT'
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "02:00";
+      AUTOREBOOT
       systemctl enable unattended-upgrades
       systemctl restart unattended-upgrades
 
@@ -394,9 +458,27 @@ write_files:
       locale-gen en_US.UTF-8
       update-locale LANG=en_US.UTF-8
 
+      # ── GitHub CLI ─────────────────────────────
+      if has_app gh; then
+        echo "--- Installing GitHub CLI ---"
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+          | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+          > /etc/apt/sources.list.d/github-cli.list
+        apt-get update -qq
+        apt-get install -y gh
+        echo "gh installed (auth + clone handled post-setup over Tailscale)"
+      else
+        echo "--- Skipping GitHub CLI (not in BOOTSTRAP_APPS) ---"
+      fi
+
       # ── Claude Code ─────────────────────────────
-      echo "--- Installing Claude Code ---"
-      sudo -u __SSH_USER__ bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+      if has_app claude-code; then
+        echo "--- Installing Claude Code ---"
+        sudo -u __SSH_USER__ bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+      else
+        echo "--- Skipping Claude Code (not in BOOTSTRAP_APPS) ---"
+      fi
 
       # ── Done ───────────────────────────────────
       echo "SETUP_COMPLETE $(date -Iseconds)" > /var/log/hetzner-setup-done
@@ -410,8 +492,11 @@ runcmd:
     alias ll='ls -alF'
     alias la='ls -A'
     alias l='ls -CF'
-    c() { IS_SANDBOX=1 claude --continue --dangerously-skip-permissions "$@"; }
     ALIASES
+    APPS=",__BOOTSTRAP_APPS__,"
+    if echo "$APPS" | grep -q ',claude-code,'; then
+      echo 'c() { claude --continue --dangerously-skip-permissions "$@"; }' >> /home/__SSH_USER__/.bash_aliases
+    fi
     chown __SSH_USER__:__SSH_USER__ /home/__SSH_USER__/.bash_aliases
 CIEOF
 
@@ -431,6 +516,8 @@ sed_inplace \
   -e "s|__SERVER_NAME__|${SERVER_NAME}|g" \
   -e "s|__TIMEZONE__|${TIMEZONE}|g" \
   -e "s|__CLOUDFLARE_ONLY__|${CLOUDFLARE_ONLY}|g" \
+  -e "s|__BOOTSTRAP_APPS__|${BOOTSTRAP_APPS}|g" \
+  -e "s|__TS_TAGS__|${TS_TAGS}|g" \
   "$CLOUD_INIT"
 
 # ── Create Server ───────────────────────────────
@@ -461,13 +548,12 @@ fi
 
 SERVER_IP=$(hcloud server ip "$SERVER_NAME")
 
-# ── Wait for cloud-init + Tailscale ─────────────
+# ── Wait for Tailscale ──────────────────────────
 echo ""
-echo "--- Waiting for setup to complete ---"
+echo "--- Waiting for Tailscale to connect ---"
 SECONDS=0
 while true; do
   elapsed=$SECONDS
-  # Check if server appears in Tailscale
   if tailscale status 2>/dev/null | grep -q "$SERVER_NAME"; then
     printf "\r[%ds] Tailscale connected!                \n" "$elapsed"
     break
@@ -480,10 +566,29 @@ while true; do
   sleep 5
 done
 
+# ── Wait for setup completion ───────────────────
+SSH_IDENTITY_FILE="${HCLOUD_SSH_KEY%.pub}"
+echo "--- Waiting for setup to finish ---"
+SECONDS=0
+while true; do
+  elapsed=$SECONDS
+  if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+    -i "$HOME/.ssh/${SSH_IDENTITY_FILE}" \
+    "${SSH_USER}@${SERVER_NAME}" "test -f /var/log/hetzner-setup-done" 2>/dev/null; then
+    printf "\r[%ds] Setup complete!                     \n" "$elapsed"
+    break
+  fi
+  printf "\r[%ds] Waiting for setup to finish..." "$elapsed"
+  if [ "$elapsed" -gt 600 ]; then
+    printf "\r[%ds] Timeout -- SSH in and check /var/log/hetzner-setup.log\n" "$elapsed"
+    break
+  fi
+  sleep 10
+done
+
 # ── Append to ~/.ssh/config-ephemeral-servers ──
 SSH_EPHEMERAL="$HOME/.ssh/config-ephemeral-servers"
 SSH_CONFIG="$HOME/.ssh/config"
-SSH_IDENTITY_FILE="${HCLOUD_SSH_KEY%.pub}"
 
 # Ensure Include exists in main config
 if ! grep -q "Include.*config-ephemeral-servers" "$SSH_CONFIG" 2>/dev/null; then
@@ -494,9 +599,20 @@ if ! grep -q "Include.*config-ephemeral-servers" "$SSH_CONFIG" 2>/dev/null; then
   echo "Added Include to ~/.ssh/config"
 fi
 
-# Remove old entry + stale host key, then add fresh
-if grep -q "^Host ${SERVER_NAME}$" "$SSH_EPHEMERAL" 2>/dev/null; then
-  sed_inplace "/^# vps auto-spawned.*/{N;/Host ${SERVER_NAME}/,/^$/d;}" "$SSH_EPHEMERAL"
+# Remove old entry + stale host key (robust awk-based cleanup)
+if [ -f "$SSH_EPHEMERAL" ] && grep -q "^Host ${SERVER_NAME}$" "$SSH_EPHEMERAL"; then
+  awk -v host="${SERVER_NAME}" '
+    /^# vps auto-spawned/ { comment=$0; next }
+    /^Host / {
+      if ($2 == host) { comment=""; skip=1; next }
+      if (comment != "") { print comment; comment="" }
+    }
+    skip && /^[^ \t]/ { skip=0 }
+    skip { next }
+    comment != "" { print comment; comment="" }
+    { print }
+    END { if (comment != "") print comment }
+  ' "$SSH_EPHEMERAL" > "${SSH_EPHEMERAL}.tmp" && mv "${SSH_EPHEMERAL}.tmp" "$SSH_EPHEMERAL"
   ssh-keygen -R "$SERVER_NAME" 2>/dev/null || true
 fi
 
@@ -508,7 +624,6 @@ Host ${SERVER_NAME}
     User ${SSH_USER}
     IdentityFile ~/.ssh/${SSH_IDENTITY_FILE}
 SSHCONF
-ssh-keygen -R "$SERVER_NAME" 2>/dev/null || true
 echo "Added ${SERVER_NAME} to ~/.ssh/config-ephemeral-servers"
 
 echo ""
@@ -516,9 +631,9 @@ echo "=== Server Created ==="
 echo "Name:      $SERVER_NAME"
 echo "Public IP: $SERVER_IP"
 echo "Firewall:  $FW_NAME (80/443 only)"
+echo "Apps:      tailscale, $BOOTSTRAP_APPS"
 echo ""
-echo "=== Connect (wait ~3 min for setup) ==="
-echo "  tailscale status                       # verify server appeared"
+echo "=== Connect ==="
 echo "  mosh ${SSH_USER}@${SERVER_NAME}        # Mosh via Tailscale"
 echo "  ssh ${SSH_USER}@${SERVER_NAME}         # SSH via Tailscale"
 echo ""
@@ -527,10 +642,6 @@ echo ""
 echo "=== Verify ==="
 echo "  ssh ${SSH_USER}@${SERVER_NAME} cat /var/log/hetzner-setup-done"
 echo "  ssh ${SSH_USER}@${SERVER_NAME} cat /var/log/hetzner-setup.log"
-echo ""
-echo "=== Deploy Ghost ==="
-echo "  scp infra/ghost/{deploy-ghost.sh,docker-compose.yml} ${SSH_USER}@${SERVER_NAME}:/opt/ghost/"
-echo "  ssh ${SSH_USER}@${SERVER_NAME} bash /opt/ghost/deploy-ghost.sh"
 echo ""
 echo "=== Destroy ==="
 echo "  hcloud server delete ${SERVER_NAME}"

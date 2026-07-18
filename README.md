@@ -45,6 +45,7 @@ python agent/integrations/telegram/setup_session.py
 2. Create an admin account at `https://your-domain/ghost`
 3. Settings → Integrations → Add custom integration → copy the Admin API key
 4. (Optional) Settings → Mailgun → configure for newsletter emails
+5. **Member signup emails** — configure Mailgun **SMTP** so magic-link/signup emails send (otherwise subscribers hit *"Failed to send magic link email"*). This is a **separate** credential from the newsletter API key above — Ghost sends transactional email over SMTP only. See [`infra/ghost/deploy-ghost.sh`](infra/ghost/deploy-ghost.sh) → "Member Signup Emails" for the `mail__*` compose vars and the `MAILGUN_SMTP_PASSWORD` secret.
 
 ### 3. Substack credentials
 

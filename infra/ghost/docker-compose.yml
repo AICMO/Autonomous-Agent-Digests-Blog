@@ -30,6 +30,16 @@ services:
       database__connection__user: ${MYSQL_USER}
       database__connection__password: ${MYSQL_PASSWORD}
       database__connection__database: ${MYSQL_DATABASE}
+      # Transactional email (magic links, member signup/login) via Mailgun SMTP — STARTTLS on 587.
+      # Password from /opt/ghost/.env (MAILGUN_SMTP_PASSWORD); separate from the newsletter Mailgun API.
+      # No `service: Mailgun` — Nodemailer's well-known preset forces implicit TLS (secure=true), which
+      # collides with STARTTLS on 587 (OpenSSL "wrong version number"). Explicit host+port is enough.
+      mail__transport: SMTP
+      mail__options__host: smtp.mailgun.org
+      mail__options__port: 587
+      mail__options__auth__user: postmaster@aicmo.blog
+      mail__options__auth__pass: ${MAILGUN_SMTP_PASSWORD}
+      mail__from: "aicmo.blog <noreply@aicmo.blog>"
     volumes:
       - ghost_content:/var/lib/ghost/content
     depends_on:

@@ -41,11 +41,11 @@ python agent/integrations/telegram/setup_session.py
 
 ### 2. Ghost setup
 
-1. Deploy Ghost using `infra/ghost/deploy-ghost.sh` (Docker Compose on any Linux server)
+1. Deploy Ghost using `ghost/deploy-ghost.sh` from the `AICMO/infra` repo (private) — Docker Compose on any Linux server
 2. Create an admin account at `https://your-domain/ghost`
 3. Settings → Integrations → Add custom integration → copy the Admin API key
 4. (Optional) Settings → Mailgun → configure for newsletter emails
-5. **Member signup emails** — configure Mailgun **SMTP** so magic-link/signup emails send (otherwise subscribers hit *"Failed to send magic link email"*). This is a **separate** credential from the newsletter API key above — Ghost sends transactional email over SMTP only. See [`infra/ghost/deploy-ghost.sh`](infra/ghost/deploy-ghost.sh) → "Member Signup Emails" for the `mail__*` compose vars and the `MAILGUN_SMTP_PASSWORD` secret.
+5. **Member signup emails** — configure Mailgun **SMTP** so magic-link/signup emails send (otherwise subscribers hit *"Failed to send magic link email"*). This is a **separate** credential from the newsletter API key above — Ghost sends transactional email over SMTP only. See `ghost/deploy-ghost.sh` → "Member Signup Emails" in the `AICMO/infra` repo for the `mail__*` compose vars and the `MAILGUN_SMTP_PASSWORD` secret.
 
 ### 3. Substack credentials
 
@@ -107,12 +107,6 @@ agent/integrations/
     substack.py              # Substack publisher (--post, --draft, HTML→ProseMirror)
     requirements.txt         # requests
     README.md                # Substack auth setup guide
-infra/
-  hetzner-setup.sh           # one-click VPS setup (see below)
-  ghost/
-    deploy-ghost.sh          # deploy Ghost (Docker Compose)
-    docker-compose.yml       # Caddy + Ghost + MySQL
-  ubuntu_security_hardening.sh  # server hardening (SSH, UFW, fail2ban, sysctl)
 .github/
   scripts/
     backfill-digests.sh           # backfill past digests sequentially
@@ -130,20 +124,18 @@ infra/
 
 ## Infrastructure
 
-One-click hardened VPS setup with [`infra/hetzner-setup.sh`](infra/hetzner-setup.sh):
+Server and deployment configuration lives in its own repo, `AICMO/infra` (private).
+This repo is the content pipeline only.
 
-```bash
-export HCLOUD_TOKEN="..."
-export TAILSCALE_API_KEY="..."
-bash infra/hetzner-setup.sh my-server
-```
+That repo holds the Hetzner provisioning and hardening scripts, the Caddy edge, and one
+directory per self-hosted service — including the Ghost deployment this pipeline publishes
+to. It is designed so a fresh VPS plus `setup-server.sh` rebuilds the box end to end.
 
 **Connection stack:** Tailscale + Termius + Mosh/SSH + sshid.io hardware keys
 
-- Provisions Ubuntu 24.04 on Hetzner Cloud via API + cloud-init
+- Ubuntu 24.04 on Hetzner Cloud via API + cloud-init
 - No public SSH — all access through Tailscale mesh VPN
 - Cloudflare-only HTTP/S, Docker + Compose, fail2ban, unattended upgrades
-- Server auto-appears `~/.ssh/config` and in Tailscale
 - Connect via Termius or from any device: `mosh evios@my-server`
 
 ### Why these apps?

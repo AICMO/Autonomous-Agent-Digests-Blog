@@ -2,7 +2,7 @@
 - [x] disable Mailgun unsubscribe tracking (Ghost handles its own)
   - Mailgun dashboard → Sending → Domains → Domain Settings → Tracking → Unsubscribes → Off
 - [x] fix member subscribe — transactional email was unconfigured, so Ghost fell back to local SMTP (`ECONNREFUSED 127.0.0.1:587` → "Failed to send magic link email")
-  - Added Mailgun SMTP transport to `infra/ghost/docker-compose.yml` (`mail__*` vars); password lives in `/opt/ghost/.env` as `MAILGUN_SMTP_PASSWORD` (gitignored, never committed)
+  - Added Mailgun SMTP transport to `ghost/docker-compose.yml` in the `AICMO/infra` repo (`mail__*` vars); password lives in `/opt/ghost/.env` as `MAILGUN_SMTP_PASSWORD` (gitignored, never committed)
   - Gotchas, in the order they bit: (1) needs Mailgun **SMTP** creds — separate from the newsletter **API key**; Ghost sends transactional mail over SMTP only; (2) do NOT set `service: Mailgun` — its Nodemailer preset forces implicit TLS on port 587 → OpenSSL "wrong version number"; (3) host region must match the account (US = `smtp.mailgun.org`, EU = `smtp.eu.mailgun.org`); (4) apply with `docker compose up -d`, not `restart` (restart ignores new env)
 - [ ] add email sender icon (BIMI)
   - Need DMARC policy set to `quarantine` or `reject` on aicmo.blog
